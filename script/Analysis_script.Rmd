@@ -1,0 +1,1195 @@
+---
+title: "Analysis_script"
+author: "Benjamin"
+date: "2025-09-25"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+#Packages
+```{r}
+# Package names
+packages <- c("magrittr", "dplyr", "reshape2", "fastmatch", "psych", "parallel", "MASS", "pheatmap", "gridExtra", "ggplot2", "Hmisc","readxl", "cutpointr","ggpubr","tidyr", "readxl", "kableExtra", "purrr", "viridis", "lubridate", "flextable", "webshot", "tibble", "car")
+
+# Packages loading
+invisible(lapply(packages, library, character.only = TRUE))
+```
+
+# 1. Data cleaning
+```{r}
+raw = read.csv2("common_objects/euromelanoma_data.csv")
+colnames(raw) = c(
+  "id",
+  "submit_date",
+  "questionnaire_id",
+  "gender",
+  "birth_day_1",  # might be a duplicate with next
+  "birth_day_2",
+  "birth_month",
+  "birth_year",
+  "education_level",
+  "many_moles_self",
+  "changed_or_suspicious_lesion",
+  "prev_skin_cancer",
+  "reason_is_friend_or_family_skin_cancer",
+  "reason_is_skin_check",
+  "reason_no_answer",
+  "prev_full_skin_exam",
+  "num_full_skin_exams",
+  "outdoor_occupation",
+  "years_outdoor_work",
+  "sun_reaction",
+  "sunburn_before_18",
+  "sunscreen_outdoor",
+  "sunscreen_sunbathing",
+  "never_sunbathes",
+  "lived_in_sunny_country",
+  "sunny_country_before_18",
+  "sunny_country_after_18",
+  "sunny_country_no_answer",
+  "years_sunny_before_18",
+  "years_sunny_after_18",
+  "weeks_sunny_holidays_per_year",
+  "uses_solarium",
+  "years_solarium",
+  "family_melanoma",
+  "no_prev_skin_cancer",
+  "personal_melanoma",
+  "personal_nmsc",
+  "uncertain_skin_cancer_history",
+  "skin_cancer_no_answer",
+  "exam_today",
+  "used_dermoscopy",
+  "num_moles",
+  "lentigines_back_chest",
+  "atypical_moles_present",
+  "num_atypical_moles",
+  "actinic_keratoses",
+  "suspected_melanoma",
+  "num_suspected_melanomas",
+  "suspected_bcc",
+  "num_suspected_bccs",
+  "suspected_scc",
+  "num_suspected_sccs",
+  "suspected_other",
+  "num_suspected_other",
+  "who_detected_lesion",
+  "euromelanoma_year",
+  "country"
+)
+
+#Fix age
+byear = sapply(raw$birth_day_1, function(x) {
+  unlist(strsplit(x, "\\."))[1]  # Extract the year part
+})
+raw$birth_day_1 = byear
+
+raw = raw %>%
+  mutate(
+    birth_year_from_date = birth_day_1,
+    birth_year_combined = dplyr::coalesce(as.numeric(birth_year_from_date), as.numeric(birth_year)),
+    euromelanoma_year = as.numeric(euromelanoma_year),
+    age = euromelanoma_year - birth_year_combined,
+    age_group = cut(
+      age,
+      breaks = c(0, 19, 34, 49, 64, Inf),
+      labels = c("0–19", "20–34", "35–49", "50–64", "65+"),
+      right = TRUE
+    )
+  ) 
+# fix IDs
+raw = raw %>%
+  mutate(
+    eumel_id = paste0("EUMEL_", id, "_", euromelanoma_year)
+  )
+# organize
+raw = raw %>%
+  relocate(eumel_id, .before = 1) %>%
+  relocate(birth_year_from_date, birth_year_combined, age, age_group, .before = education_level)
+raw = raw %>%
+  mutate(across(where(is.character), ~na_if(., "")))
+raw = raw %>%
+  mutate(across(where(is.character), ~na_if(., "9999")))
+raw = raw %>%
+  mutate(
+    uses_solarium = ifelse(uses_solarium == "0", "No", uses_solarium)
+  )
+
+# Analysis ready data
+mel_df = raw %>%
+  mutate(
+    across(all_of(factor_vars), ~as.factor(.)),
+    across(all_of(numeric_vars), ~as.numeric(.))
+  )
+```
+
+# Descriptive statistics
+```{r}
+mel_df = mel_df %>%
+  filter(age != 0, age < 99) %>%
+  filter(!is.na(age), !is.na(gender))
+
+clin_df = mel_df[,c(5,15,16,17,18,19,20,25,39,41,42,26,36,37,28,27,31,32, 47,49,48,51,52,54,56,12)] %>%
+  mutate(across(everything(), as.character)) %>%
+  mutate(skin_type = case_when(
+      sun_reaction == "My skin always burns, never tans" ~ "Type I",
+      sun_reaction == "My skin always burns, tans minimally or with difficulty" ~ "Type II",
+      sun_reaction == "My skin initially burns and then tans" ~ "Type III",
+      sun_reaction == "My skin burns minimally, tans readily" ~ "Type IV",
+      TRUE ~ NA_character_
+    ) %>% factor(levels = c("Type I", "Type II", "Type III", "Type IV"))) %>% 
+  mutate(skin_grouped = ifelse(sun_reaction == "My skin always burns, never tans" | sun_reaction == "My skin always burns, tans minimally or with difficulty", "Type_I_II", "Type_II_IV")) %>% 
+  mutate(
+    family_melanoma_bin = case_when(
+      family_melanoma %in% c("Yes, 1 relative", "Yes, 2 or more first degree relatives") ~ "Yes",
+      TRUE ~ "No"
+    ),
+    uses_solarium_bin = case_when(
+      grepl("^Yes", uses_solarium) ~ "Yes",
+      TRUE ~ "No"
+    ),
+    weeks_sunny_holidays_bin = if_else(weeks_sunny_holidays_per_year == "more than 2 weeks", "Yes", "No"),
+    sunburn_before_18 = if_else(sunburn_before_18 == "Yes", "Yes", "No"),
+    neavus_grouped = ifelse(num_moles == "< 25", "< 25", "> 25"),
+    skin_type_I = ifelse(skin_type =="Type I", "Type I", "Type II_III_IV"),
+     suspected_all = if_else(
+      suspected_bcc == "Yes" |
+      suspected_scc == "Yes" |
+      suspected_melanoma == "Yes",
+      "Yes", "No", missing = NA
+    )) %>% 
+    mutate(suspected_NMSC = if_else(suspected_bcc == "Yes" | suspected_scc == "Yes","Yes", "No", missing = NA),
+    solarium_heavy = if_else(uses_solarium == "Yes, 21 or more sessions/year", "Yes", "No", missing = NA)) %>% 
+  mutate(across(everything(), as.factor)) %>% 
+  relocate(age, .after = 34) %>% 
+  mutate(age = as.numeric(age))
+```
+
+## 2.1 Attendance
+```{r}
+mel_df = readRDS("common_objects/euromelanoma_data_cleaned.rds")
+mel_df = mel_df %>%
+  filter(age != 0, age < 99) %>%
+  filter(!is.na(age), !is.na(gender))
+
+attendance_df = mel_df[,c(12,5,15,16,17,18,19,20)]
+table(attendance_df$reason_no_answer)
+attendance_df = attendance_df %>% 
+  filter(reason_no_answer!= "Yes")
+
+# Step 1: Define the relevant columns (or use column numbers 3:7)
+reason_vars = c(
+  "many_moles_self",
+  "changed_or_suspicious_lesion",
+  "prev_skin_cancer",
+  "reason_is_friend_or_family_skin_cancer",
+  "reason_is_skin_check"
+)
+
+# Step 2: Calculate summary for each reason
+reason_summary = attendance_df %>%
+  dplyr::select(all_of(reason_vars)) %>%
+  summarise(across(everything(), ~ sum(. == "Yes", na.rm = TRUE))) %>%
+  pivot_longer(cols = everything(), names_to = "reason", values_to = "yes_count") %>%
+  mutate(
+    total = nrow(attendance_df),
+    percent = yes_count / total,
+    reason = recode(reason,  # Optional: prettier labels
+      many_moles_self = "Many moles",
+      changed_or_suspicious_lesion = "Changed/suspicious lesion",
+      prev_skin_cancer = "Previous skin cancer",
+      reason_is_friend_or_family_skin_cancer = "Family/friend had skin cancer",
+      reason_is_skin_check = "Routine skin check"
+    )
+  )
+
+# Step 3: Plot
+ggplot(reason_summary, aes(x = reorder(reason, -percent), y = percent)) +
+  geom_col(fill = "#69b3a2") +
+  geom_text(aes(label = paste0(yes_count, " (", scales::percent(percent, accuracy = 1), ")")), 
+            vjust = -0.5, size = 4.5) +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1), expand = expansion(mult = c(0, 0.1))) +
+  labs(
+    title = "Reasons for Attending Melanoma Screening",
+    x = NULL,
+    y = "Proportion of Participants (Yes)",
+    caption = paste("Total N =", nrow(attendance_df))
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# Step 4: Pivot to long format and filter only "Yes" answers
+attendance_long = attendance_df %>%
+  dplyr::select(gender, all_of(reason_vars)) %>%
+  pivot_longer(
+    cols = -gender,
+    names_to = "reason",
+    values_to = "response"
+  ) %>%
+  filter(response == "Yes") %>%
+  mutate(reason = recode(reason,
+    many_moles_self = "Many moles",
+    changed_or_suspicious_lesion = "Changed/suspicious lesion",
+    prev_skin_cancer = "Previous skin cancer",
+    reason_is_friend_or_family_skin_cancer = "Family/friend had skin cancer",
+    reason_is_skin_check = "Routine skin check"
+  ))
+
+# Step 5: Summarize counts and calculate percentages
+reason_gender_summary = attendance_long %>%
+  group_by(gender, reason) %>%
+  summarise(
+    yes_count = n(),
+    .groups = "drop"
+  ) %>%
+  left_join(
+    attendance_df %>%
+      count(gender, name = "total_n"),
+    by = "gender"
+  ) %>%
+  mutate(percent = yes_count / total_n)
+
+# Step 6: Plot with faceting by gender
+ggplot(reason_gender_summary, aes(x = reorder(reason, -percent), y = percent, fill = gender)) +
+  geom_col(show.legend = FALSE) +
+  geom_text(aes(label = paste0(yes_count, " (",  scales::percent(percent, 1), ")")),
+            vjust = -0.5, size = 4.2) +
+  scale_y_continuous(labels =  scales::percent_format(accuracy = 1), expand = expansion(mult = c(0, 0.1))) +
+  labs(
+    title = "Reasons for Attending Melanoma Screening by Gender",
+    x = NULL,
+    y = "Proportion of Participants (Yes)",
+    caption = paste("Total N =", nrow(attendance_df))
+  ) +
+  facet_wrap(~ gender) +
+  theme_minimal(base_size = 14) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+## Plot for manuscript
+```{r}
+# Create a list of p-values per reason
+pvals = reason_gender_summary %>%
+  group_by(reason) %>%
+  summarise(
+    p_value = {
+      tab = matrix(c(
+        yes_count[gender == "Female"],
+        total_n[gender == "Female"] - yes_count[gender == "Female"],
+        yes_count[gender == "Male"],
+        total_n[gender == "Male"] - yes_count[gender == "Male"]
+      ), nrow = 2, byrow = TRUE)
+      
+      if (any(tab < 5)) fisher.test(tab)$p.value else chisq.test(tab)$p.value
+    }
+  ) %>%
+  mutate(sig_label = ifelse(p_value < 0.05, "*", ""))
+
+#detail
+pvals = tibble::tibble(
+  reason = c(
+    "Changed/suspicious lesion",
+    "Family/friend had skin cancer",
+    "Many moles",
+    "Previous skin cancer",
+    "Routine skin check"
+  ),
+  p_value = c(
+    0.0126199016,
+    0.0001042719,
+    0.0001476411,
+    0.0035145491,
+    0.1032502124
+  )
+) %>%
+  mutate(
+    sig_label = case_when(
+      p_value < 0.001 ~ "***",
+      p_value < 0.01 ~ "**",
+      p_value < 0.05 ~ "*",
+      TRUE ~ ""
+    )
+  )
+
+# Create plot df
+plot_df = reason_gender_summary %>%
+  left_join(pvals, by = "reason") %>%
+  mutate(sig_label = ifelse(gender == "Female", sig_label, ""))
+
+#Plot
+
+attend_plot = ggplot(plot_df, aes(x = reorder(reason, percent), y = percent, fill = gender)) +
+  geom_col(position = position_dodge(width = 0.8), width = 0.7) +
+  
+  # Bar counts
+  geom_text(
+    aes(label = yes_count),
+    position = position_dodge(width = 0.8),
+    hjust = -0.1,
+    size = 4.2
+  ) +
+  
+  # Significance asterisks
+  geom_text(
+    aes(label = sig_label),
+    position = position_dodge(width = 0.8),
+    vjust = -0.5,
+    hjust = -2.5,
+    size = 6,
+    fontface = "bold",
+    color = "black"
+  ) +
+  
+  scale_y_continuous(
+    labels = scales::percent_format(accuracy = 1),
+    expand = expansion(mult = c(0, 0.2))
+  ) +
+  
+  coord_flip() +
+  
+  labs(
+    title = "Reasons for Attending Melanoma Screening by Gender",
+    x = NULL,
+    y = "Proportion of Participants by Gender",
+    fill = "Gender",
+    caption = "Significance (Fisher's exact test): * p < 0.05 | ** p < 0.01 | *** p < 0.001\nTotal N = 18,466"
+  ) +
+  
+  theme_minimal(base_size = 14) +
+  theme(axis.text.y = element_text(hjust = 1))
+
+#Save plot
+ggsave(
+  filename = "attend_plot_highres.png",
+  plot = attend_plot,
+  dpi = 600,
+  width = 11,       # in inches
+  height = 7,       # adjust as needed
+  units = "in"
+)
+```
+
+
+### Statistics
+```{r}
+pvals = reason_gender_summary %>%
+  group_by(reason) %>%
+  summarise(
+    p_value = {
+      tab = matrix(c(
+        yes_count[gender == "Female"],
+        total_n[gender == "Female"] - yes_count[gender == "Female"],
+        yes_count[gender == "Male"],
+        total_n[gender == "Male"] - yes_count[gender == "Male"]
+      ), nrow = 2, byrow = TRUE)
+      
+      if (any(tab < 5)) fisher.test(tab)$p.value else chisq.test(tab)$p.value
+    },
+    .groups = "drop"
+  ) %>%
+  mutate(
+    significance = case_when(
+      p_value < 0.001 ~ "***",
+      p_value < 0.01 ~ "**",
+      p_value < 0.05 ~ "*",
+      TRUE ~ ""
+    )
+  )
+
+# 2. Pivot reason_gender_summary to wide format
+summary_gender_table = reason_gender_summary %>%
+  dplyr::select(reason, gender, yes_count, percent) %>%
+  pivot_wider(
+    names_from = gender,
+    values_from = c(yes_count, percent),
+    names_glue = "{gender}_{.value}"
+  )
+
+# 3. Combine with p-values
+final_summary = summary_gender_table %>%
+  left_join(pvals, by = "reason") %>%
+  arrange(desc(Female_percent))
+  
+```
+
+
+## 2.2 Descr. stat table
+```{r}
+mel_df = readRDS("common_objects/euromelanoma_data_cleaned.rds")
+mel_df = mel_df %>%
+  filter(age != 0, age < 99) %>%
+  filter(!is.na(age), !is.na(gender))
+
+descr_df = mel_df[,c(12,5,13,14)] %>% 
+  mutate(education_level = as.character(education_level)) %>% 
+  mutate(education_level = ifelse(is.na(education_level), "No answer", education_level)) %>% 
+  mutate(education_level = as.factor(education_level))
+
+
+
+# Step 2: Age summary
+age_summary = descr_df %>%
+  group_by(gender) %>%
+  summarise(
+    median = median(age, na.rm = TRUE),
+    min = min(age, na.rm = TRUE),
+    max = max(age, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(value = paste0(median, " (", min, "–", max, ")")) %>%
+  dplyr::select(gender, value) %>%
+  pivot_wider(names_from = gender, values_from = value) %>%
+  mutate(Variable = "Age (years)") %>%
+  dplyr::select(Variable, Female, Male)
+
+# Add overall median
+overall_age = descr_df %>%
+  summarise(value = paste0(median(age, na.rm = TRUE), " (", min(age), "–", max(age), ")")) %>%
+  pull()
+
+age_summary$Overall = overall_age
+age_summary = age_summary %>% dplyr::select(Variable, Overall, Female, Male)
+
+# Step 3: Function to summarize categorical variables
+summarize_cat = function(var) {
+  tab = descr_df %>%
+    filter(!is.na(!!sym(var))) %>% 
+    group_by(gender, !!sym(var)) %>%
+    summarise(n = n(), .groups = "drop") %>%
+    complete(gender, !!sym(var), fill = list(n = 0)) %>%
+    group_by(gender) %>%
+    mutate(p = round(100 * n / sum(n), 1),
+           value = paste0(n, " (", p, "%)")) %>%
+    ungroup() %>%
+    dplyr::select(gender, level = !!sym(var), value) %>%
+    pivot_wider(names_from = gender, values_from = value) %>%
+    mutate(Variable = level) %>%
+    dplyr::select(-level)
+
+  # Add overall
+  overall = descr_df %>%
+    filter(!is.na(!!sym(var))) %>% 
+    group_by(!!sym(var)) %>%
+    summarise(n = n(), .groups = "drop") %>%
+    mutate(p = round(100 * n / sum(n), 1),
+           value = paste0(n, " (", p, "%)")) %>%
+    rename(level = !!sym(var)) %>%
+    dplyr::select(level, Overall = value)
+
+  result = bind_cols(overall, tab) 
+
+  return(result)
+}
+
+
+# Step 4: Build sections
+age_group_tbl = summarize_cat("age_group") %>%
+  bind_rows(tibble(Variable = "Age group"))  # header row
+age_group_tbl = age_group_tbl[c(6,1,2,3,4,5),]
+
+education_tbl = summarize_cat("education_level") %>%
+  bind_rows(tibble(Variable = "Education level"))  # header row
+education_tbl = education_tbl[c(6,1,3,4,5,2),]
+
+# Step 5: Combine all parts
+final_table = bind_rows(
+  age_summary,
+  age_group_tbl,
+  education_tbl
+)
+
+#Remove unnecesarry column
+final_table = final_table[,-5]
+
+
+# Optional: move Total row to bottom
+final_table = rbind(final_table, c("Total", 
+          nrow(descr_df),
+          sum(descr_df$gender == "Female"),
+          sum(descr_df$gender == "Male")))
+
+# Step 7: Create flextable
+flextable(final_table) %>%
+  autofit() %>%
+  align(align = "center", part = "all") %>%
+  bold(i = ~ Variable %in% c("Age (years)", "Age group", "Education level", "Total"), part = "body") %>%
+  set_header_labels(
+    Variable = "Variable",
+    Overall = "Overall",
+    Female = "Female",
+    Male = "Male",
+    p = "P"
+  )
+
+```
+
+## 2.3. Risk table
+```{r}
+mel_df = readRDS("common_objects/euromelanoma_data_cleaned.rds")
+mel_df = mel_df %>%
+  filter(age != 0, age < 99) %>%
+  filter(!is.na(age), !is.na(gender))
+
+risk_df = mel_df[,c(5,25,39,41,42,26,36,37,28,27,31,32)]
+table(risk_df$family_melanoma)
+table(risk_df$sunny_country_after_18)
+
+
+# Step 1: Replace NA with "No answer" for all relevant columns
+risk_df_clean = risk_df %>%
+  mutate(across(everything(),
+    ~ ifelse(is.na(.x), "No answer", as.character(.x))
+  )) %>%
+  mutate(across(everything(), as.factor))
+
+# Step 2: Combine specific levels
+risk_df_clean = risk_df_clean %>%
+  mutate(
+    family_melanoma_bin = case_when(
+      family_melanoma %in% c("Yes, 1 relative", "Yes, 2 or more first degree relatives") ~ "Yes",
+      family_melanoma == "No answer" ~ "No answer",
+      TRUE ~ "No"
+    ),
+    uses_solarium_bin = case_when(
+      grepl("^Yes", uses_solarium) ~ "Yes",
+      uses_solarium == "No answer" ~ "No answer",
+      TRUE ~ "No"
+    ),
+    weeks_sunny_holidays_bin = if_else(weeks_sunny_holidays_per_year == "more than 2 weeks", "Yes", "No/Other"),
+    
+    # Rename columns for consistency
+    sunburn_before_18_bin = if_else(sunburn_before_18 == "Yes", "Yes", "No/Other"),
+    sunny_country_before_18_bin = if_else(sunny_country_before_18 == "Yes", "Yes", "No/Other"),
+    sunny_country_after_18_bin = if_else(sunny_country_after_18 == "Yes", "Yes", "No/Other"),
+    personal_melanoma_bin = if_else(personal_melanoma == "Yes", "Yes", "No"),
+    personal_nmsc_bin = if_else(personal_nmsc == "Yes", "Yes", "No")
+  )
+
+# Step 3: Define variable groups
+constitutional_vars = list(
+  "Self-reported skin type" = "sun_reaction",
+  "Family history of melanoma" = "family_melanoma_bin",
+  "Personal history of melanoma" = "personal_melanoma_bin",
+  "Personal history of NMSC" = "personal_nmsc_bin"
+)
+
+behavioral_vars = list(
+  "Sunburn before age 18 years (≥1 episode)" = "sunburn_before_18_bin",
+  "Sunny holidays (>2 weeks/year)" = "weeks_sunny_holidays_bin",
+  "Ever use solarium" = "uses_solarium_bin",
+  "Sunscreen use when sunbathing" = "sunscreen_sunbathing",
+  "Sunscreen use when outdoor >1 h (other than sunbathing)" = "sunscreen_outdoor",
+  "≥1 year in countries with high sun before age 18" = "sunny_country_before_18_bin",
+  "≥1 year in countries with high sun after age 18" = "sunny_country_after_18_bin"
+)
+
+# Step 4: Function to create summary table for a single variable
+summarize_variable = function(df, varname, varlabel) {
+  var_sym = sym(varname)
+
+  # Tabulate by gender and level
+  gender_tab = df %>%
+    group_by(gender, level = .data[[varname]]) %>%
+    summarise(n = n(), .groups = "drop") %>%
+    complete(gender, level = unique(df[[varname]]), fill = list(n = 0)) %>%
+    group_by(gender) %>%
+    mutate(pct = round(100 * n / sum(n), 1),
+           label = paste0(n, " (", pct, "%)")) %>%
+    dplyr::select(gender, level, label) %>%
+    pivot_wider(names_from = gender, values_from = label)
+
+  # Tabulate overall
+  total_tab = df %>%
+    count(level = .data[[varname]]) %>%
+    mutate(pct = round(100 * n / sum(n), 1),
+           Overall = paste0(n, " (", pct, "%)")) %>%
+    dplyr::select(level, Overall)
+
+  # Merge and finalize
+  result = gender_tab %>%
+    full_join(total_tab, by = "level") %>%
+    rename(Level = level) %>%
+    mutate(Variable = "") %>%
+    relocate(Variable, Level, Overall)
+
+  # Chi-squared test
+  chi = chisq.test(table(df[[varname]], df$gender))
+  result$P = ""
+  result$P[1] = format.pval(chi$p.value, digits = 3)
+
+  # Label row
+  label_row = tibble(
+    Variable = varlabel,
+    Level = "", Overall = "", Female = "", Male = "", P = ""
+  )
+
+  bind_rows(label_row, result)
+}
+
+df = risk_df_clean
+varname = constitutional_vars[[1]]
+varlabel = names(constitutional_vars)[[1]]
+
+# Step 5: Apply to all variables
+table_constitutional = purrr::map2_dfr(constitutional_vars, names(constitutional_vars), ~ summarize_variable(risk_df_clean, .x, .y))
+table_behavioral = purrr::map2_dfr(behavioral_vars, names(behavioral_vars), ~ summarize_variable(risk_df_clean, .x, .y))
+
+# Step 6: Combine and format with flextable
+risk_table = bind_rows(table_constitutional, table_behavioral)
+
+# Make it publ. ready
+risk_table = risk_table[,-6]
+risk_table_fin = risk_table[!risk_table$Level == "No answer",]
+risk_table_fin$Level = gsub("/Other", "", risk_table_fin$Level)
+
+
+#split it
+const_table = risk_table_fin[1:14,]
+const_table[c(4, 5), ] <- const_table[c(5, 4), ]
+
+flextable(const_table) %>%
+  autofit() %>%
+  bold(i = ~ Variable != "", part = "body") %>%
+  align(j = "Variable", align = "left", part = "all") %>%
+  align(j = c("Level", "Overall", "Female", "Male"), align = "right", part = "all") %>%
+  set_header_labels(
+    Variable = "Constitutional Risk factors",
+    Level = "",
+    Overall = "Overall",
+    Female = "Females",
+    Male = "Males",
+    P = "P"
+  )
+
+###
+beh_table = risk_table_fin[15:nrow(risk_table_fin),]
+flextable(beh_table) %>%
+  autofit() %>%
+  bold(i = ~ Variable != "", part = "body") %>%
+  align(j = "Variable", align = "left", part = "all") %>%
+  align(j = c("Level", "Overall", "Female", "Male"), align = "right", part = "all") %>%
+  set_header_labels(
+    Variable = "Behavioral Risk factors",
+    Level = "",
+    Overall = "Overall",
+    Female = "Females",
+    Male = "Males",
+    P = "P"
+  )
+
+```
+
+## 2.4. clinical
+```{r}
+mel_df = readRDS("common_objects/euromelanoma_data_cleaned.rds")
+mel_df = mel_df %>%
+  filter(age != 0, age < 99) %>%
+  filter(!is.na(age), !is.na(gender))
+
+clin_df = mel_df[,c(5,47,49,48,51,52,54,56)] %>%
+  mutate(across(everything(), as.character))   %>%
+  mutate(
+    suspected_any = if_else(
+      suspected_melanoma == "Yes" |
+      suspected_bcc == "Yes" |
+      suspected_scc == "Yes",
+      "Yes", "No", missing = NA
+    )) %>% 
+  mutate(neavus_grouped = ifelse(num_moles == "< 25", "< 25", "> 25")) %>%
+  mutate(across(everything(),
+    ~ ifelse(is.na(.x), "No answer", as.character(.x))
+    )) %>% 
+  mutate(across(everything(), as.factor))
+
+
+# STEP 2: Define variable rules
+grouped_vars = c("num_moles", "neavus_grouped")
+binary_vars = setdiff(names(clin_df), c("gender", grouped_vars))
+
+# for code
+clin_df_clean = clin_df
+
+# STEP 3: Summary function
+summarize_clin_var = function(df, varname, varlabel) {
+  var_sym = sym(varname)
+  
+  #Get rid of no answers
+  df = df %>% 
+    mutate(across(everything(), as.character))   %>%
+    filter(.data[[varname]] != "No answer") %>% 
+    mutate(across(everything(), as.factor))
+  # Gender-specific tabulation
+  gender_tab = df %>%
+    group_by(gender, level = .data[[varname]]) %>%
+    summarise(n = n(), .groups = "drop") %>%
+    complete(gender, level = unique(df[[varname]]), fill = list(n = 0)) %>%
+    group_by(gender) %>%
+    mutate(
+      pct = round(100 * n / sum(n), 1),
+      label = paste0(n, " (", pct, "%)")
+    ) %>%
+    dplyr::select(gender, level, label) %>%
+    pivot_wider(names_from = gender, values_from = label)
+
+  # Overall tabulation
+  total_tab = df %>%
+    count(level = .data[[varname]]) %>%
+    mutate(
+      pct = round(100 * n / sum(n), 1),
+      Overall = paste0(n, " (", pct, "%)")
+    ) %>%
+    dplyr::select(level, Overall)
+
+  # Merge and reorder
+  result = gender_tab %>%
+    full_join(total_tab, by = "level") %>%
+    rename(Level = level) %>%
+    mutate(Variable = "") %>%
+    relocate(Variable, Level, Overall)
+
+  # Label row
+  label_row = tibble(
+    Variable = varlabel,
+    Level = "", Overall = "", Female = "", Male = ""
+  )
+
+  bind_rows(label_row, result)
+}
+
+
+# STEP 4: Build full table
+summary_clin_table = bind_rows(
+  summarize_clin_var(clin_df_clean, "num_moles", "Total nevus count"),
+  summarize_clin_var(clin_df_clean, "neavus_grouped", "Total nevus count (grouped)"),
+  summarize_clin_var(clin_df_clean, "atypical_moles_present", "Presence of atypical nevi"),
+  summarize_clin_var(clin_df_clean, "lentigines_back_chest", "Presence of lentigines"),
+  summarize_clin_var(clin_df_clean, "actinic_keratoses", "Presence of AK"),
+  summarize_clin_var(clin_df_clean, "suspected_any", "Individuals screened with\nsuspected skin cancer of any type"),
+  summarize_clin_var(clin_df_clean, "suspected_melanoma", "Individuals screened with suspected melanoma"),
+  summarize_clin_var(clin_df_clean, "suspected_bcc", "Individuals screened with suspected BCC"),
+  summarize_clin_var(clin_df_clean, "suspected_scc", "Individuals screened with suspected SCC")
+)
+
+# STEP 5: Create flextable
+flextable(summary_clin_table) %>%
+  autofit() %>%
+  bold(i = ~ Variable != "", part = "body") %>%
+  align(i = ~ Variable != "", j = "Variable", align = "left", part = "body") %>%
+  align(i = ~ Variable == "", align = "right", part = "body") %>%
+  set_header_labels(
+    Variable = "Clinical finding",
+    Level = "Levels",
+    Overall = "Overall",
+    Female = "Females",
+    Male = "Males"
+  )%>%
+  align(j = "Variable", align = "left", part = "header") %>%  # Left-align "Clinical finding"
+  align(j = c("Level", "Overall", "Female", "Male"), align = "center", part = "header")  # Right-align others
+
+```
+
+
+# 3. Resolution issues
+```{r}
+webshot::webshot("results/manuscript_plots/behavioral-table.html", file = "behav.png", zoom = 15)
+webshot::webshot("results/manuscript_plots/clinical_table.html", file = "clinical.png", zoom = 15)
+webshot::webshot("results/manuscript_plots/const_table.html", file = "constitut.png", zoom = 15)
+webshot::webshot("results/manuscript_plots/stat1table.html", file = "descr.png", zoom = 15)
+```
+
+
+# 4. Logisctic regression models
+## Reference check function
+```{r}
+check_reference_levels = function(df) {
+  df %>%
+    dplyr::select(where(is.factor)) %>%
+    purrr::map_df(~ tibble(
+      Reference = levels(.)[1],
+      All_Levels = paste(levels(.), collapse = ", ")
+    ), .id = "Variable")
+}
+```
+
+
+## Data
+```{r}
+mel_df = readRDS("common_objects/euromelanoma_data_cleaned.rds")
+mel_df = mel_df %>%
+  filter(age != 0, age < 99) %>%
+  filter(!is.na(age), !is.na(gender))
+
+clin_df = mel_df[,c(5,15,16,17,18,19,20,25,39,41,42,26,36,37,28,27,31,32, 47,49,48,51,52,54,56,12)] %>%
+  mutate(across(everything(), as.character)) %>%
+  mutate(skin_type = case_when(
+      sun_reaction == "My skin always burns, never tans" ~ "Type I",
+      sun_reaction == "My skin always burns, tans minimally or with difficulty" ~ "Type II",
+      sun_reaction == "My skin initially burns and then tans" ~ "Type III",
+      sun_reaction == "My skin burns minimally, tans readily" ~ "Type IV",
+      TRUE ~ NA_character_
+    ) %>% factor(levels = c("Type I", "Type II", "Type III", "Type IV"))) %>% 
+  mutate(skin_grouped = ifelse(sun_reaction == "My skin always burns, never tans" | sun_reaction == "My skin always burns, tans minimally or with difficulty", "Type_I_II", "Type_II_IV")) %>% 
+  mutate(
+    family_melanoma_bin = case_when(
+      family_melanoma %in% c("Yes, 1 relative", "Yes, 2 or more first degree relatives") ~ "Yes",
+      TRUE ~ "No"
+    ),
+    uses_solarium_bin = case_when(
+      grepl("^Yes", uses_solarium) ~ "Yes",
+      TRUE ~ "No"
+    ),
+    weeks_sunny_holidays_bin = if_else(weeks_sunny_holidays_per_year == "more than 2 weeks", "Yes", "No"),
+    sunburn_before_18 = if_else(sunburn_before_18 == "Yes", "Yes", "No"),
+    neavus_grouped = ifelse(num_moles == "< 25", "< 25", "> 25"),
+    skin_type_I = ifelse(skin_type =="Type I", "Type I", "Type II_III_IV"),
+     suspected_all = if_else(
+      suspected_bcc == "Yes" |
+      suspected_scc == "Yes" |
+      suspected_melanoma == "Yes",
+      "Yes", "No", missing = NA
+    )) %>% 
+    mutate(suspected_NMSC = if_else(suspected_bcc == "Yes" | suspected_scc == "Yes","Yes", "No", missing = NA),
+    solarium_heavy = if_else(uses_solarium == "Yes, 21 or more sessions/year", "Yes", "No", missing = NA)) %>% 
+  mutate(across(everything(), as.factor)) %>% 
+  relocate(age, .after = 34) %>% 
+  mutate(age = as.numeric(age))
+```
+
+
+## Composite plots
+### Melanoma
+```{r}
+mel_binned = clin_df[,c(23, 1:6, 27:31, 20:22,  15:18, 10:12, 34, 36)] %>% 
+  dplyr::select(-sunscreen_sunbathing, 
+                -actinic_keratoses,
+                -sunscreen_sunbathing, 
+                -sunscreen_outdoor, 
+                -weeks_sunny_holidays_bin,
+                -sunny_country_after_18,
+                -sunny_country_before_18) %>% drop_na()
+table(mel_binned$suspected_melanoma)
+
+#check references
+refs = check_reference_levels(mel_binned)
+
+#Build model
+logit_model = glm(suspected_melanoma ~ ., data = mel_binned, family = binomial())
+
+# Tidy model summary with odds ratios
+model_summary = broom::tidy(logit_model, conf.int = TRUE, exponentiate = TRUE) %>%
+  filter(term != "(Intercept)") %>%
+  mutate(
+    term_clean = gsub("`|\\(.*?\\)", "", term),  # clean up names
+    significant = p.value < 0.05
+  )
+
+model_summary = model_summary %>%
+  mutate(
+    term_clean = gsub("`|\\(.*?\\)", "", term),  # clean term names
+    significant = p.value < 0.05,
+
+    # Human-readable labels
+    label = case_when(
+      term_clean == "genderMale" ~ "Male gender",
+      term_clean == "many_moles_selfYes" ~ "Self-reported many moles",
+      term_clean == "changed_or_suspicious_lesionYes" ~ "Recently changed lesion",
+      term_clean == "prev_skin_cancerYes" ~ "Previous skin cancer",
+      term_clean == "reason_is_friend_or_family_skin_cancerYes" ~ "Attended due to family/friend with skin cancer",
+      term_clean == "reason_is_skin_checkYes" ~ "Attended for routine skin check",
+      term_clean == "skin_groupedType_II_IV" ~ "Skin type III–IV",
+      term_clean == "family_melanoma_binYes" ~ "Family history of melanoma",
+      term_clean == "uses_solarium_binYes" ~ "Solarium use",
+      term_clean == "weeks_sunny_holidays_binmore than 2 weeks" ~ "Sunny holidays > 2 weeks/year",
+      term_clean == "neavus_grouped> 25" ~ "More than 25 nevi",
+      term_clean == "atypical_moles_presentYes" ~ "Presence of atypical nevi",
+      term_clean == "lentigines_back_chestYes" ~ "Presence of lentigines",
+      term_clean == "sunscreen_outdoorSometimes" ~ "Sunscreen outdoor: Sometimes (vs Never)",
+      term_clean == "sunscreen_outdoorAlways" ~ "Sunscreen outdoor: Always (vs Never)",
+      term_clean == "sunny_country_before_18Yes" ~ "≥1 year in sunny country before 18",
+      term_clean == "sunny_country_after_18Yes" ~ "≥1 year in sunny country after 18",
+      term_clean == "personal_melanomaYes" ~ "Personal history of melanoma",
+      term_clean == "personal_nmscYes" ~ "Personal history of NMSC",
+      term_clean == "sunburn_before_18Yes" ~ "Sunburn before age 18",
+      term_clean == "solarium_heavyYes" ~ "Heavy solarium user",
+      TRUE ~ term_clean  # fallback
+    )
+  )
+
+
+# Forest plot
+mel_plot = ggplot(model_summary, aes(x = reorder(label, estimate), y = estimate, ymin = conf.low, ymax = conf.high, color = significant)) +
+  geom_pointrange() +
+  geom_hline(yintercept = 1, linetype = "dashed") +
+  coord_flip() +
+  scale_y_log10() +
+  scale_color_manual(values = c("gray50", "firebrick")) +
+  labs(
+    title = "Predictors of Suspicious Melanoma",
+    x = NULL,
+    y = "Odds Ratio (log scale)",
+    color = "Significant (p < 0.05)"
+  ) +
+  theme_minimal()
+```
+
+#### Check multicolinearity
+```{r}
+# Get VIF matrix
+vif_matrix = vif(logit_model)
+
+# Extract adjusted GVIF values 
+vif_df = data.frame(
+  variable = names(vif_matrix),
+  adjusted_vif = as.numeric(vif_matrix)
+)
+
+# Plot
+mel_vif = ggplot(vif_df, aes(x = reorder(variable, adjusted_vif), y = adjusted_vif)) +
+  geom_col(fill = "steelblue") +
+  geom_hline(yintercept = 5, linetype = "dashed", color = "firebrick", linewidth = 1) +
+  annotate("text", x = 1, y = 5.2, label = "Threshold (VIF = 5)", hjust = 0, color = "firebrick") +
+  coord_flip() +
+  labs(
+    title = "Suspected Melanoma" ,
+    subtitle = "Adjusted Variance Inflation Factor (GVIF) per Predictor",
+    x = "Predictor",
+    y = expression("GVIF"^{1/(2*Df)})
+  ) +
+  theme_minimal(base_size = 13)
+
+```
+
+### NMSC
+```{r}
+nmsc_binned = clin_df[,c(35, 1:6, 27:31, 20:22,  15:18, 10:12, 34, 36)] %>% 
+  dplyr::select(-sunscreen_sunbathing, 
+                -actinic_keratoses,
+                -sunscreen_sunbathing, 
+                -sunscreen_outdoor, 
+                -weeks_sunny_holidays_bin,
+                -sunny_country_after_18,
+                -sunny_country_before_18) %>% drop_na()
+table(nmsc_binned$suspected_NMSC)
+
+#check references
+refs = check_reference_levels(nmsc_binned)
+
+#Build model
+logit_model = glm(suspected_NMSC ~ ., data = nmsc_binned, family = binomial())
+
+# Tidy model summary with odds ratios
+model_summary = broom::tidy(logit_model, conf.int = TRUE, exponentiate = TRUE) %>%
+  filter(term != "(Intercept)") %>%
+  mutate(
+    term_clean = gsub("`|\\(.*?\\)", "", term),  # clean up names
+    significant = p.value < 0.05
+  )
+
+model_summary = model_summary %>%
+  mutate(
+    term_clean = gsub("`|\\(.*?\\)", "", term),  # clean term names
+    significant = p.value < 0.05,
+
+    # Human-readable labels
+    label = case_when(
+      term_clean == "genderMale" ~ "Male gender",
+      term_clean == "many_moles_selfYes" ~ "Self-reported many moles",
+      term_clean == "changed_or_suspicious_lesionYes" ~ "Recently changed lesion",
+      term_clean == "prev_skin_cancerYes" ~ "Previous skin cancer",
+      term_clean == "reason_is_friend_or_family_skin_cancerYes" ~ "Attended due to family/friend with skin cancer",
+      term_clean == "reason_is_skin_checkYes" ~ "Attended for routine skin check",
+      term_clean == "skin_groupedType_II_IV" ~ "Skin type III–IV",
+      term_clean == "family_melanoma_binYes" ~ "Family history of melanoma",
+      term_clean == "uses_solarium_binYes" ~ "Solarium use",
+      term_clean == "weeks_sunny_holidays_binmore than 2 weeks" ~ "Sunny holidays > 2 weeks/year",
+      term_clean == "neavus_grouped> 25" ~ "More than 25 nevi",
+      term_clean == "atypical_moles_presentYes" ~ "Presence of atypical nevi",
+      term_clean == "lentigines_back_chestYes" ~ "Presence of lentigines",
+      term_clean == "sunscreen_outdoorSometimes" ~ "Sunscreen outdoor: Sometimes (vs Never)",
+      term_clean == "sunscreen_outdoorAlways" ~ "Sunscreen outdoor: Always (vs Never)",
+      term_clean == "sunny_country_before_18Yes" ~ "≥1 year in sunny country before 18",
+      term_clean == "sunny_country_after_18Yes" ~ "≥1 year in sunny country after 18",
+      term_clean == "personal_melanomaYes" ~ "Personal history of melanoma",
+      term_clean == "personal_nmscYes" ~ "Personal history of NMSC",
+      term_clean == "sunburn_before_18Yes" ~ "Sunburn before age 18",
+      term_clean == "solarium_heavyYes" ~ "Heavy solarium user",
+      TRUE ~ term_clean  # fallback
+    )
+  )
+
+
+# Forest plot
+nmsc_plot = ggplot(model_summary, aes(x = reorder(label, estimate), y = estimate, ymin = conf.low, ymax = conf.high, color = significant)) +
+  geom_pointrange() +
+  geom_hline(yintercept = 1, linetype = "dashed") +
+  coord_flip() +
+  scale_y_log10() +
+  scale_color_manual(values = c("gray50", "firebrick")) +
+  labs(
+    title = "Predictors of Suspicious NMSC",
+    x = NULL,
+    y = "Odds Ratio (log scale)",
+    color = "Significant (p < 0.05)"
+  ) +
+  theme_minimal()
+```
+
+#### Check multicolinearity
+```{r}
+# Get VIF matrix
+vif_matrix = vif(logit_model)
+
+# Extract adjusted GVIF values (last column)
+vif_df = data.frame(
+  variable = names(vif_matrix),
+  adjusted_vif = as.numeric(vif_matrix)
+)
+
+# Plot
+nmsc_vif = ggplot(vif_df, aes(x = reorder(variable, adjusted_vif), y = adjusted_vif)) +
+  geom_col(fill = "steelblue") +
+  geom_hline(yintercept = 5, linetype = "dashed", color = "firebrick", linewidth = 1) +
+  annotate("text", x = 1, y = 5.2, label = "Threshold (VIF = 5)", hjust = 0, color = "firebrick") +
+  coord_flip() +
+  labs(
+    title = "Suspected NMSC" ,
+    subtitle = "Adjusted Variance Inflation Factor (GVIF) per Predictor",
+    x = "Predictor",
+    y = expression("GVIF"^{1/(2*Df)})
+  ) +
+  theme_minimal(base_size = 13)
+
+
+```
+
+### Mel + NMSC
+```{r}
+all_binned = clin_df[,c(33, 1:6, 27:31, 20:22,  15:18, 10:12, 34, 36)] %>% 
+  dplyr::select(-sunscreen_sunbathing, 
+                -actinic_keratoses,
+                -sunscreen_sunbathing, 
+                -sunscreen_outdoor, 
+                -weeks_sunny_holidays_bin,
+                -sunny_country_after_18,
+                -sunny_country_before_18) %>% drop_na()
+table(all_binned$suspected_all)
+
+#check references
+refs = check_reference_levels(all_binned)
+
+#Build model
+logit_model = glm(suspected_all ~ ., data = all_binned, family = binomial())
+
+# Tidy model summary with odds ratios
+model_summary = broom::tidy(logit_model, conf.int = TRUE, exponentiate = TRUE) %>%
+  filter(term != "(Intercept)") %>%
+  mutate(
+    term_clean = gsub("`|\\(.*?\\)", "", term),  # clean up names
+    significant = p.value < 0.05
+  )
+
+model_summary = model_summary %>%
+  mutate(
+    term_clean = gsub("`|\\(.*?\\)", "", term),  # clean term names
+    significant = p.value < 0.05,
+
+    # Human-readable labels
+    label = case_when(
+      term_clean == "genderMale" ~ "Male gender",
+      term_clean == "many_moles_selfYes" ~ "Self-reported many moles",
+      term_clean == "changed_or_suspicious_lesionYes" ~ "Recently changed lesion",
+      term_clean == "prev_skin_cancerYes" ~ "Previous skin cancer",
+      term_clean == "reason_is_friend_or_family_skin_cancerYes" ~ "Attended due to family/friend with skin cancer",
+      term_clean == "reason_is_skin_checkYes" ~ "Attended for routine skin check",
+      term_clean == "skin_groupedType_II_IV" ~ "Skin type III–IV",
+      term_clean == "family_melanoma_binYes" ~ "Family history of melanoma",
+      term_clean == "uses_solarium_binYes" ~ "Solarium use",
+      term_clean == "weeks_sunny_holidays_binmore than 2 weeks" ~ "Sunny holidays > 2 weeks/year",
+      term_clean == "neavus_grouped> 25" ~ "More than 25 nevi",
+      term_clean == "atypical_moles_presentYes" ~ "Presence of atypical nevi",
+      term_clean == "lentigines_back_chestYes" ~ "Presence of lentigines",
+      term_clean == "sunscreen_outdoorSometimes" ~ "Sunscreen outdoor: Sometimes (vs Never)",
+      term_clean == "sunscreen_outdoorAlways" ~ "Sunscreen outdoor: Always (vs Never)",
+      term_clean == "sunny_country_before_18Yes" ~ "≥1 year in sunny country before 18",
+      term_clean == "sunny_country_after_18Yes" ~ "≥1 year in sunny country after 18",
+      term_clean == "personal_melanomaYes" ~ "Personal history of melanoma",
+      term_clean == "personal_nmscYes" ~ "Personal history of NMSC",
+      term_clean == "sunburn_before_18Yes" ~ "Sunburn before age 18",
+      term_clean == "solarium_heavyYes" ~ "Heavy solarium user",
+      TRUE ~ term_clean  
+    )
+  )
+
+
+# Forest plot
+all_plot = ggplot(model_summary, aes(x = reorder(label, estimate), y = estimate, ymin = conf.low, ymax = conf.high, color = significant)) +
+  geom_pointrange() +
+  geom_hline(yintercept = 1, linetype = "dashed") +
+  coord_flip() +
+  scale_y_log10() +
+  scale_color_manual(values = c("gray50", "firebrick")) +
+  labs(
+    title = "Predictors of Clinically Suspicious Lesions",
+    x = NULL,
+    y = "Odds Ratio (log scale)",
+    color = "Significant (p < 0.05)"
+  ) +
+  theme_minimal()
+```
+
+#### Check multicolinearity
+```{r}
+# Get VIF matrix
+vif_matrix = vif(logit_model)
+
+# Extract adjusted GVIF values (last column)
+vif_df = data.frame(
+  variable = names(vif_matrix),
+  adjusted_vif = as.numeric(vif_matrix)
+)
+
+# Plot
+both_vif = ggplot(vif_df, aes(x = reorder(variable, adjusted_vif), y = adjusted_vif)) +
+  geom_col(fill = "steelblue") +
+  geom_hline(yintercept = 5, linetype = "dashed", color = "firebrick", linewidth = 1) +
+  annotate("text", x = 1, y = 5.2, label = "Threshold (VIF = 5)", hjust = 0, color = "firebrick") +
+  coord_flip() +
+  labs(
+    title = "Suspected Melanoma + NMSC" ,
+    subtitle = "Adjusted Variance Inflation Factor (GVIF) per Predictor",
+    x = "Predictor",
+    y = expression("GVIF"^{1/(2*Df)})
+  ) +
+  theme_minimal(base_size = 13)
+
+
+```
+
+### all plots
+```{r}
+lgoreg_comp = ggarrange(all_plot, mel_plot, nmsc_plot, nrow = 1)
+ggsave(
+  filename = "logreg_plot_highres.png",
+  plot = lgoreg_comp,
+  dpi = 600,
+  width = 30,       # in inches
+  height = 7,       # adjust as needed
+  units = "in"
+)
+
+vif_comp = ggarrange(both_vif, mel_vif, nmsc_vif, nrow = 1)
+ggsave(
+  filename = "vif_plot_highres.png",
+  plot = vif_comp,
+  dpi = 600,
+  width = 30,       # in inches
+  height = 7,       # adjust as needed
+  units = "in"
+)
+```
+
