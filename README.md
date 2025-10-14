@@ -20,8 +20,7 @@ The aim of this repository is to ensure transparency and reproducibility of the 
 - Each script specifies the required R packages at the beginning.  
 
 ### `data/`
-- Raw data files from the Hungarian Euromelanoma screening questionnaires.  
-- These files are provided as originally collected, without preprocessing.  
+- Raw data files from the Hungarian Euromelanoma screening questionnaires are available upon request for the corresponding author.   
 
 ### `common_objects/`
 - Preprocessed and filtered data saved as `.rds` objects.  
@@ -37,7 +36,7 @@ The aim of this repository is to ensure transparency and reproducibility of the 
 
 All analyses can be reproduced by running the `.Rmd` scripts in the `script/` folder.  
 - The required R packages are explicitly listed at the top of each script.  
-- Raw data are provided in `data/`.  
+- Raw data files from the Hungarian Euromelanoma screening questionnaires are available upon request for the corresponding author.  
 - Preprocessed `.rds` objects are in `common_objects/` for direct use.  
 
 ---
