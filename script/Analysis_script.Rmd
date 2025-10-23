@@ -417,6 +417,77 @@ final_summary = summary_gender_table %>%
   
 ```
 
+### Effect size and OR
+```{r}
+library(dplyr)
+library(tidyr)
+library(glue)
+
+# 1) Build 2x2 inputs per reason from your reason_gender_summary
+effect_inputs <- reason_gender_summary %>%
+  dplyr::select(reason, gender, yes_count, total_n) %>%
+  pivot_wider(
+    names_from = gender,
+    values_from = c(yes_count, total_n),
+    names_sep = "_"
+  ) %>%
+  mutate(
+    female_no = total_n_Female - yes_count_Female,
+    male_no   = total_n_Male   - yes_count_Male
+  )
+
+# 2) Compute OR + 95% CI from Fisher’s exact test for each reason
+calc_effect <- function(fy, fn, my, mn){
+  mat <- matrix(c(fy, fn, my, mn), nrow = 2, byrow = TRUE,
+                dimnames = list(Gender = c("Female","Male"), Response = c("Yes","No")))
+  ft  <- fisher.test(mat)
+  c(OR = unname(ft$estimate), CI_low = ft$conf.int[1], CI_high = ft$conf.int[2], p_value = ft$p.value)
+}
+
+effect_tbl <- effect_inputs %>%
+  rowwise() %>%
+  mutate(tmp = list(calc_effect(yes_count_Female, female_no, yes_count_Male, male_no))) %>%
+  mutate(
+    OR      = tmp["OR"],
+    CI_low  = tmp["CI_low"],
+    CI_high = tmp["CI_high"],
+    p_value_OR = tmp["p_value"]
+  ) %>%
+  ungroup() %>%
+  dplyr::select(reason, OR, CI_low, CI_high, p_value_OR)
+
+# 3) Get readable % by gender and absolute percentage-point (pp) difference
+perc_tbl <- reason_gender_summary %>%
+  dplyr::select(reason, gender, percent) %>%
+  pivot_wider(names_from = gender, values_from = percent, names_glue = "{gender}_percent") %>%
+  mutate(diff_pp = (Male_percent - Female_percent) * 100)
+
+# 4) Combine with your existing p-values (for consistency with the plot captions)
+report_tbl <- final_summary %>%   # already has Female_percent / Male_percent / p_value (from your chi/fisher)
+  dplyr::select(reason, Female_percent, Male_percent, p_value) %>%
+  left_join(effect_tbl, by = "reason") %>%
+  left_join(perc_tbl %>% dplyr::select(reason, diff_pp), by = "reason") %>%
+  mutate(
+    Female_percent = scales::percent(Female_percent, accuracy = 0.1),
+    Male_percent   = scales::percent(Male_percent,   accuracy = 0.1),
+    OR_ci = glue("{round(OR, 2)} [{round(CI_low, 2)}–{round(CI_high, 2)}]"),
+    p_value_text = format.pval(p_value, digits = 3, eps = 1e-3),
+    diff_pp_text = sprintf("%+.1f pp", diff_pp)
+  ) %>%
+  dplyr::select(
+    Reason = reason,
+    `Female %` = Female_percent,
+    `Male %`   = Male_percent,
+    `Diff (pp)` = diff_pp_text,
+    `OR (95% CI)` = OR_ci,
+    `p-value` = p_value_text
+  )
+
+print(report_tbl, n = Inf)
+
+
+```
+
 
 ## 2.2 Descr. stat table
 ```{r}
@@ -858,6 +929,68 @@ clin_df = mel_df[,c(5,15,16,17,18,19,20,25,39,41,42,26,36,37,28,27,31,32, 47,49,
   mutate(across(everything(), as.factor)) %>% 
   relocate(age, .after = 34) %>% 
   mutate(age = as.numeric(age))
+```
+
+##Check for missingness
+```{r}
+library(dplyr)
+library(tidyr)
+library(rlang)
+library(readr)
+
+# --- Helper: conditional-missing summary for a given condition ----------------------
+# Returns per-variable missing counts/% within the subset,
+# PLUS a constant column with the total "Yes" count for that outcome
+cond_missing <- function(df, cond, label, yes_colname) {
+  sub <- df %>% filter({{ cond }})
+  n_sub <- nrow(sub)  # total "Yes" rows for that outcome
+  if (n_sub == 0) {
+    return(tibble(
+      variable = names(df),
+      !!paste0("n_missing_if_", label) := 0L,
+      !!paste0("pct_missing_if_", label) := 0,
+      !!paste0("total_yes_", yes_colname) := 0L
+    ))
+  }
+  sub %>%
+    summarise(across(everything(), ~ sum(is.na(.))), .groups = "drop") %>%
+    pivot_longer(everything(), names_to = "variable",
+                 values_to = paste0("n_missing_if_", label)) %>%
+    mutate(
+      !!paste0("pct_missing_if_", label) := round(
+        100 * .data[[paste0("n_missing_if_", label)]] / n_sub, 1
+      ),
+      !!paste0("total_yes_", yes_colname) := n_sub
+    )
+}
+
+# --- 1) Overall missingness on ALL variables in clin_df ----------------------------
+missing_overall <- clin_df %>%
+  summarise(across(everything(), ~ sum(is.na(.))), .groups = "drop") %>%
+  pivot_longer(cols = everything(), names_to = "variable", values_to = "n_missing") %>%
+  mutate(
+    n_total = nrow(clin_df),
+    pct_missing = round(100 * n_missing / n_total, 1)
+  )
+
+# --- 2) Conditional missingness for the 3 clinically suspicious outcomes -----------
+miss_all_yes  <- cond_missing(clin_df,  suspected_all      == "Yes", "all_yes",  "all")
+miss_mel_yes  <- cond_missing(clin_df,  suspected_melanoma == "Yes", "mel_yes",  "melanoma")
+miss_nmsc_yes <- cond_missing(clin_df,  suspected_NMSC     == "Yes", "nmsc_yes", "nmsc")
+
+# --- 3) Combine and order ----------------------------------------------------------
+missing_report <- missing_overall %>%
+  left_join(miss_all_yes,  by = "variable") %>%
+  left_join(miss_mel_yes,  by = "variable") %>%
+  left_join(miss_nmsc_yes, by = "variable") %>%
+  arrange(desc(pct_missing))
+
+# Preview
+print(missing_report, n = 50)
+
+# --- 4) Save for Supplement --------------------------------------------------------
+write_csv(missing_report, "supp_missingness_all_variables_with_outcome_subsets.csv")
+
 ```
 
 
