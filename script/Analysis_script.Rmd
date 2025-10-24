@@ -14,7 +14,7 @@ knitr::opts_chunk$set(echo = TRUE)
 #Packages
 ```{r}
 # Package names
-packages <- c("magrittr", "dplyr", "reshape2", "fastmatch", "psych", "parallel", "MASS", "pheatmap", "gridExtra", "ggplot2", "Hmisc","readxl", "cutpointr","ggpubr","tidyr", "readxl", "kableExtra", "purrr", "viridis", "lubridate", "flextable", "webshot", "tibble", "car")
+packages <- c("magrittr", "dplyr", "reshape2", "fastmatch", "parallel", "MASS", "pheatmap", "gridExtra", "ggplot2", "Hmisc","readxl", "cutpointr","ggpubr","tidyr", "readxl", "kableExtra", "purrr", "viridis", "lubridate", "flextable", "webshot", "tibble", "car")
 
 # Packages loading
 invisible(lapply(packages, library, character.only = TRUE))
