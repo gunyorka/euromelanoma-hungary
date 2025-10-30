@@ -130,6 +130,7 @@ mel_df = raw %>%
 
 # Descriptive statistics
 ```{r}
+mel_df = readRDS("common_objects/euromelanoma_data_cleaned.rds")
 mel_df = mel_df %>%
   filter(age != 0, age < 99) %>%
   filter(!is.na(age), !is.na(gender))
