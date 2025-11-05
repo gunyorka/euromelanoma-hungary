@@ -199,14 +199,8 @@ reason_summary = attendance_df %>%
   pivot_longer(cols = everything(), names_to = "reason", values_to = "yes_count") %>%
   mutate(
     total = nrow(attendance_df),
-    percent = yes_count / total,
-    reason = recode(reason,  # Optional: prettier labels
-      many_moles_self = "Many moles",
-      changed_or_suspicious_lesion = "Changed/suspicious lesion",
-      prev_skin_cancer = "Previous skin cancer",
-      reason_is_friend_or_family_skin_cancer = "Family/friend had skin cancer",
-      reason_is_skin_check = "Routine skin check"
-    )
+    percent = yes_count / total
+    
   )
 
 # Step 3: Plot
@@ -232,14 +226,7 @@ attendance_long = attendance_df %>%
     names_to = "reason",
     values_to = "response"
   ) %>%
-  filter(response == "Yes") %>%
-  mutate(reason = recode(reason,
-    many_moles_self = "Many moles",
-    changed_or_suspicious_lesion = "Changed/suspicious lesion",
-    prev_skin_cancer = "Previous skin cancer",
-    reason_is_friend_or_family_skin_cancer = "Family/friend had skin cancer",
-    reason_is_skin_check = "Routine skin check"
-  ))
+  filter(response == "Yes") 
 
 # Step 5: Summarize counts and calculate percentages
 reason_gender_summary = attendance_long %>%
